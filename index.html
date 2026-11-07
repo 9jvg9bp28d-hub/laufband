@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Laufband</title>
+<style>
+  :root { --bg:#111; --card:#1e1e1e; --fg:#f2f2f2; --mut:#999; --acc:#2a9d8f; --red:#e63946; --yel:#e9c46a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         padding:env(safe-area-inset-top) 14px 20px; user-select:none; -webkit-user-select:none; }
+  h1 { font-size:18px; font-weight:600; margin:14px 0 4px; display:flex; justify-content:space-between; align-items:center; }
+  #status { font-size:13px; color:var(--mut); font-weight:400; }
+  .big { text-align:center; background:var(--card); border-radius:18px; padding:14px 10px; margin:10px 0; }
+  #speed { font-size:72px; font-weight:700; line-height:1; font-variant-numeric:tabular-nums; }
+  .unit { font-size:18px; color:var(--mut); }
+  #target { font-size:15px; color:var(--mut); margin-top:6px; }
+  .row { display:grid; gap:10px; margin:10px 0; }
+  .c2 { grid-template-columns:1fr 1fr; } .c3 { grid-template-columns:repeat(3,1fr); } .c4 { grid-template-columns:repeat(4,1fr); }
+  .stats { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .stat { background:var(--card); border-radius:14px; padding:10px; text-align:center; }
+  .stat b { display:block; font-size:24px; font-variant-numeric:tabular-nums; }
+  .stat span { font-size:12px; color:var(--mut); }
+  button { font:inherit; font-size:22px; font-weight:600; color:var(--fg); background:#333; border:0; border-radius:16px;
+           padding:18px 0; touch-action:manipulation; }
+  button:active { filter:brightness(1.4); }
+  button:disabled { opacity:.35; }
+  .go { background:var(--acc); } .stop { background:var(--red); } .pause { background:var(--yel); color:#111; }
+  .pre { font-size:19px; padding:14px 0; }
+  #connect { width:100%; background:var(--acc); margin-top:10px; }
+  #hint { font-size:13px; color:var(--mut); margin-top:16px; line-height:1.4; }
+</style>
+</head>
+<body>
+<h1>Laufband <span id="status">nicht verbunden</span></h1>
+<button id="connect">Verbinden</button>
+
+<div class="big">
+  <div><span id="speed">–,–</span> <span class="unit">km/h</span></div>
+  <div id="target">Ziel: –</div>
+</div>
+
+<div class="row c2">
+  <button class="ctl" data-d="-0.1">− 0,1</button>
+  <button class="ctl" data-d="0.1">+ 0,1</button>
+</div>
+<div class="row c2">
+  <button class="ctl" data-d="-0.5">− 0,5</button>
+  <button class="ctl" data-d="0.5">+ 0,5</button>
+</div>
+<div class="row c4" id="presets"></div>
+<div class="row c3">
+  <button class="ctl go" id="start">Start</button>
+  <button class="ctl pause" id="pause">Pause</button>
+  <button class="ctl stop" id="stop">Stopp</button>
+</div>
+
+<div class="stats">
+  <div class="stat"><b id="dist">–</b><span>Strecke (km)</span></div>
+  <div class="stat"><b id="time">–</b><span>Zeit</span></div>
+</div>
+
+<div id="hint">Seite in der App „Bluefy“ öffnen (Safari kann kein Bluetooth). Tempo-Bereich laut Laufband: 1,0 bis 6,0 km/h.</div>
+
+<script>
+const SVC = 0x1826, CP = 0x2ad9, DATA = 0x2acd, RANGE = 0x2ad4;
+const PRESETS = [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0];
+let cp = null, dev = null, target = null, current = null, minS = 1.0, maxS = 6.0, busy = Promise.resolve();
+const $ = id => document.getElementById(id);
+const fmt = v => v.toFixed(1).replace('.', ',');
+
+PRESETS.forEach(p => {
+  const b = document.createElement('button');
+  b.className = 'ctl pre'; b.textContent = fmt(p); b.onclick = () => setSpeed(p);
+  $('presets').appendChild(b);
+});
+document.querySelectorAll('[data-d]').forEach(b =>
+  b.onclick = () => setSpeed((target ?? current ?? 2.0) + parseFloat(b.dataset.d)));
+$('start').onclick = () => send([0x07]);
+$('pause').onclick = () => send([0x08, 0x02]);
+$('stop').onclick  = () => send([0x08, 0x01]);
+$('connect').onclick = connect;
+enable(false);
+
+function enable(on) { document.querySelectorAll('.ctl').forEach(b => b.disabled = !on); }
+function status(t) { $('status').textContent = t; }
+
+async function connect() {
+  if (!navigator.bluetooth) { alert('Kein Bluetooth im Browser. Bitte die Seite in der App „Bluefy“ öffnen.'); return; }
+  try {
+    status('suche …');
+    dev = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+    dev.addEventListener('gattserverdisconnected', () => { cp = null; enable(false); status('getrennt'); $('connect').style.display = ''; });
+    const srv = await (await dev.gatt.connect()).getPrimaryService(SVC);
+    try {
+      const r = new DataView((await (await srv.getCharacteristic(RANGE)).readValue()).buffer);
+      minS = r.getUint16(0, true) / 100; maxS = r.getUint16(2, true) / 100;
+    } catch (e) {}
+    const data = await srv.getCharacteristic(DATA);
+    data.addEventListener('characteristicvaluechanged', e => parseData(e.target.value));
+    await data.startNotifications();
+    cp = await srv.getCharacteristic(CP);
+    cp.addEventListener('characteristicvaluechanged', e => {
+      const v = e.target.value;
+      if (v.getUint8(0) === 0x80 && v.getUint8(2) !== 0x01) status('Befehl abgelehnt (' + v.getUint8(2) + ')');
+    });
+    await cp.startNotifications();
+    await send([0x00]);               // Steuerung anfordern
+    enable(true); status('verbunden'); $('connect').style.display = 'none';
+  } catch (e) { status('Fehler: ' + e.message); }
+}
+
+function send(bytes) {
+  if (!cp) return;
+  busy = busy.then(() => cp.writeValue(new Uint8Array(bytes))).catch(async e => {
+    // Steuerung evtl. verloren: neu anfordern und einmal wiederholen
+    try { await cp.writeValue(new Uint8Array([0x00])); await cp.writeValue(new Uint8Array(bytes)); }
+    catch (e2) { status('Fehler: ' + e2.message); }
+  });
+  return busy;
+}
+
+function setSpeed(v) {
+  v = Math.round(Math.min(maxS, Math.max(minS, v)) * 10) / 10;
+  target = v; $('target').textContent = 'Ziel: ' + fmt(v) + ' km/h';
+  const raw = Math.round(v * 100);
+  send([0x02, raw & 0xff, raw >> 8]);
+}
+
+function parseData(dv) {
+  let i = 0; const f = dv.getUint16(i, true); i += 2;
+  if (!(f & 0x0001)) { current = dv.getUint16(i, true) / 100; i += 2; $('speed').textContent = fmt(current); }
+  if (f & 0x0002) i += 2;
+  if (f & 0x0004) { const d = dv.getUint16(i, true) + (dv.getUint8(i + 2) << 16); i += 3; $('dist').textContent = (d / 1000).toFixed(2).replace('.', ','); }
+  if (f & 0x0008) i += 4;
+  if (f & 0x0010) i += 4;
+  if (f & 0x0020) i += 1;
+  if (f & 0x0040) i += 1;
+  if (f & 0x0080) i += 5;
+  if (f & 0x0100) i += 1;
+  if (f & 0x0200) i += 1;
+  if (f & 0x0400) { const t = dv.getUint16(i, true); i += 2;
+    $('time').textContent = Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
+}
+</script>
+</body>
+</html>
