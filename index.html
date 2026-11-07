@@ -61,12 +61,14 @@
   <div class="stat"><b id="time">–</b><span>Zeit</span></div>
 </div>
 
-<div id="hint">Seite in der App „Bluefy“ öffnen (Safari kann kein Bluetooth). Tempo-Bereich laut Laufband: 1,0 bis 6,0 km/h.</div>
+<div id="hint">Seite in der App „Bluefy“ öffnen (Safari kann kein Bluetooth).</div>
+<div id="raw" style="font:11px monospace;color:#666;margin-top:8px;word-break:break-all;display:none"></div>
 
 <script>
 const SVC = 0x1826, CP = 0x2ad9, DATA = 0x2acd, RANGE = 0x2ad4;
-const PRESETS = [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0];
-let cp = null, dev = null, target = null, current = null, minS = 1.0, maxS = 6.0, busy = Promise.resolve();
+const PRESETS = [3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 9.0, 10.0];
+let cp = null, dev = null, target = null, current = null, minS = 1.0, maxS = 12.0, busy = Promise.resolve();
+let devDist = 0, devTime = 0, ownDist = 0, ownTime = 0, lastTs = null;
 const $ = id => document.getElementById(id);
 const fmt = v => v.toFixed(1).replace('.', ',');
 
@@ -81,6 +83,7 @@ $('start').onclick = () => send([0x07]);
 $('pause').onclick = () => send([0x08, 0x02]);
 $('stop').onclick  = () => send([0x08, 0x01]);
 $('connect').onclick = connect;
+document.querySelector('h1').onclick = () => { const r = $('raw'); r.style.display = r.style.display ? '' : 'none'; };
 enable(false);
 
 function enable(on) { document.querySelectorAll('.ctl').forEach(b => b.disabled = !on); }
@@ -95,7 +98,7 @@ async function connect() {
     const srv = await (await dev.gatt.connect()).getPrimaryService(SVC);
     try {
       const r = new DataView((await (await srv.getCharacteristic(RANGE)).readValue()).buffer);
-      minS = r.getUint16(0, true) / 100; maxS = r.getUint16(2, true) / 100;
+      minS = r.getUint16(0, true) / 100;
     } catch (e) {}
     const data = await srv.getCharacteristic(DATA);
     data.addEventListener('characteristicvaluechanged', e => parseData(e.target.value));
@@ -129,10 +132,11 @@ function setSpeed(v) {
 }
 
 function parseData(dv) {
+  $('raw').textContent = 'Daten: ' + [...new Uint8Array(dv.buffer)].map(b => b.toString(16).padStart(2, '0')).join(' ');
   let i = 0; const f = dv.getUint16(i, true); i += 2;
   if (!(f & 0x0001)) { current = dv.getUint16(i, true) / 100; i += 2; $('speed').textContent = fmt(current); }
   if (f & 0x0002) i += 2;
-  if (f & 0x0004) { const d = dv.getUint16(i, true) + (dv.getUint8(i + 2) << 16); i += 3; $('dist').textContent = (d / 1000).toFixed(2).replace('.', ','); }
+  if (f & 0x0004) { devDist = dv.getUint16(i, true) + (dv.getUint8(i + 2) << 16); i += 3; }
   if (f & 0x0008) i += 4;
   if (f & 0x0010) i += 4;
   if (f & 0x0020) i += 1;
@@ -140,8 +144,14 @@ function parseData(dv) {
   if (f & 0x0080) i += 5;
   if (f & 0x0100) i += 1;
   if (f & 0x0200) i += 1;
-  if (f & 0x0400) { const t = dv.getUint16(i, true); i += 2;
-    $('time').textContent = Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
+  if (f & 0x0400) { devTime = dv.getUint16(i, true); i += 2; }
+  // eigene Messung, falls das Laufband 0 meldet
+  const now = Date.now();
+  if (lastTs && current > 0) { const dt = Math.min((now - lastTs) / 1000, 5); ownTime += dt; ownDist += current / 3.6 * dt; }
+  lastTs = now;
+  const d = devDist > 0 ? devDist : ownDist, t = Math.round(devTime > 0 ? devTime : ownTime);
+  $('dist').textContent = (d / 1000).toFixed(2).replace('.', ',');
+  $('time').textContent = Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
 }
 </script>
 </body>
